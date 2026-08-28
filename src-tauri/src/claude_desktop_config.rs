@@ -747,10 +747,51 @@ pub fn map_proxy_request_model(mut body: Value, provider: &Provider) -> Result<V
         })?;
 
     body["model"] = json!(upstream_model);
+    apply_vision_routing(&mut body, provider, &upstream_model);
     if should_normalize_mimo_anthropic_thinking_history(provider, &upstream_model) {
         normalize_mimo_anthropic_thinking_history(&mut body);
     }
     Ok(body)
+}
+
+/// 视觉自动路由：供应商配置了 `claudeDesktopVisionModel` 且请求包含图片块时，
+/// 把映射后的上游模型替换为视觉模型。纯文本请求不受影响，因此用户无需在
+/// Claude Desktop 里手动切换模型，带图对话也能无缝连续。
+fn apply_vision_routing(body: &mut Value, provider: &Provider, upstream_model: &str) {
+    let Some(vision_model) = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.claude_desktop_vision_model.as_deref())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    else {
+        return;
+    };
+    if vision_model == upstream_model || !body_contains_image(body) {
+        return;
+    }
+    body["model"] = json!(vision_model);
+    log::info!("[ClaudeDesktop] 视觉自动路由: {upstream_model} -> {vision_model}");
+}
+
+/// 判断 Anthropic Messages 请求体是否包含图片块。
+///
+/// 图片出现在 `messages[].content[]` 的 `{"type": "image", ...}` 块中，
+/// 也可能内嵌在 tool_result 的内容里，因此对 messages 子树做递归扫描。
+fn body_contains_image(body: &Value) -> bool {
+    fn walk(value: &Value) -> bool {
+        match value {
+            Value::Object(map) => {
+                if map.get("type").and_then(Value::as_str) == Some("image") {
+                    return true;
+                }
+                map.values().any(walk)
+            }
+            Value::Array(items) => items.iter().any(walk),
+            _ => false,
+        }
+    }
+    body.get("messages").map(walk).unwrap_or(false)
 }
 
 fn strip_one_m_suffix_for_route_lookup(model: &str) -> &str {
@@ -1628,6 +1669,72 @@ mod tests {
         let err = map_proxy_request_model(json!({"model": "claude-opus-4-8"}), &provider)
             .expect_err("unknown route should fail");
         assert!(err.to_string().contains("claude-opus-4-8"));
+    }
+
+    #[test]
+    fn claude_desktop_proxy_vision_routing_switches_model_for_image_requests() {
+        let image_body = || {
+            json!({
+                "model": "claude-sonnet-4-6",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}},
+                        {"type": "text", "text": "图里有什么？"}
+                    ]
+                }]
+            })
+        };
+
+        // 未配置视觉模型：带图请求保持原映射结果
+        let provider = proxy_provider("proxy");
+        let mapped = map_proxy_request_model(image_body(), &provider).expect("map route");
+        assert_eq!(mapped["model"], json!("kimi-k2"));
+
+        // 配置视觉模型：带图请求切换到视觉模型
+        let mut vision_provider = proxy_provider("vision");
+        vision_provider
+            .meta
+            .as_mut()
+            .expect("meta")
+            .claude_desktop_vision_model = Some("qwen3.8-max".to_string());
+        let mapped = map_proxy_request_model(image_body(), &vision_provider).expect("map route");
+        assert_eq!(mapped["model"], json!("qwen3.8-max"));
+
+        // 纯文本请求不受视觉路由影响
+        let text_body = json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let mapped = map_proxy_request_model(text_body, &vision_provider).expect("map route");
+        assert_eq!(mapped["model"], json!("kimi-k2"));
+
+        // 映射结果本身就是视觉模型时不重复替换
+        let mut same_provider = proxy_provider("same");
+        same_provider
+            .meta
+            .as_mut()
+            .expect("meta")
+            .claude_desktop_vision_model = Some("kimi-k2".to_string());
+        let mapped = map_proxy_request_model(image_body(), &same_provider).expect("map route");
+        assert_eq!(mapped["model"], json!("kimi-k2"));
+
+        // tool_result 内嵌的图片块同样触发路由
+        let tool_body = json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "t1",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}}
+                    ]
+                }]
+            }]
+        });
+        let mapped = map_proxy_request_model(tool_body, &vision_provider).expect("map route");
+        assert_eq!(mapped["model"], json!("qwen3.8-max"));
     }
 
     #[test]

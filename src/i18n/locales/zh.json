@@ -220,6 +220,8 @@
     "upstreamModelLabel": "实际请求模型",
     "supports1mLabel": "声明支持 1M",
     "supports1mShort": "1M",
+    "visionModelLabel": "视觉模型（可选）",
+    "visionModelHint": "消息包含图片时自动改用该模型（如 qwen3.8-max、glm-4.6v），纯文本请求不受影响——无需手动切换模型即可发图。留空 = 不启用。",
     "directModelListTitle": "模型列表",
     "directModelListCollapsedHint": "原生 Claude 模型供应商通常不用填写，Claude Desktop 会自动读取 /v1/models。",
     "directModelListHint": "配置 Claude Desktop 可用的 Sonnet、Opus、Haiku 模型。留空时 Claude Desktop 会自动读取 /v1/models；勾选 1M 会声明支持 1M 上下文。",

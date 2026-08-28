@@ -220,6 +220,8 @@
     "upstreamModelLabel": "Requested model",
     "supports1mLabel": "Declare 1M",
     "supports1mShort": "1M",
+    "visionModelLabel": "Vision model (optional)",
+    "visionModelHint": "When a message contains images, requests are automatically sent to this model (e.g. qwen3.8-max, glm-4.6v). Text-only requests are unaffected — send images without switching models manually. Leave empty to disable.",
     "directModelListTitle": "Model List",
     "directModelListCollapsedHint": "Native Claude model providers usually do not need this. Claude Desktop will fetch /v1/models automatically.",
     "directModelListHint": "Configure the Sonnet, Opus, and Haiku models available to Claude Desktop. Leave this empty to let Claude Desktop fetch /v1/models automatically. Checking 1M declares 1M context support.",
