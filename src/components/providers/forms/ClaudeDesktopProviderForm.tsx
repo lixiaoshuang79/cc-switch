@@ -310,6 +310,9 @@ export function ClaudeDesktopProviderForm({
   );
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const [visionModel, setVisionModel] = useState(
+    initialData?.meta?.claudeDesktopVisionModel ?? "",
+  );
   const { data: defaultRoutes = [] } = useQuery({
     queryKey: ["claudeDesktopDefaultRoutes"],
     queryFn: () => providersApi.getClaudeDesktopDefaultRoutes(),
@@ -783,6 +786,9 @@ export function ClaudeDesktopProviderForm({
     };
 
     meta.claudeDesktopModelRoutes = routeMap;
+    meta.claudeDesktopVisionModel = needsModelMapping
+      ? visionModel.trim() || undefined
+      : undefined;
     meta.providerType = activeProviderType;
     meta.authBinding =
       activeProviderType === "github_copilot"
@@ -1197,6 +1203,26 @@ export function ClaudeDesktopProviderForm({
                         </div>
                       );
                     })}
+                  </div>
+
+                  <div className="space-y-2 border-t border-border-default pt-4">
+                    <Label htmlFor="claude-desktop-vision-model">
+                      {t("claudeDesktop.visionModelLabel", {
+                        defaultValue: "视觉模型（可选）",
+                      })}
+                    </Label>
+                    <Input
+                      id="claude-desktop-vision-model"
+                      value={visionModel}
+                      onChange={(event) => setVisionModel(event.target.value)}
+                      placeholder="qwen3.8-max"
+                    />
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      {t("claudeDesktop.visionModelHint", {
+                        defaultValue:
+                          "消息包含图片时自动改用该模型（如 qwen3.8-max、glm-4.6v），纯文本请求不受影响——无需手动切换模型即可发图。留空 = 不启用。",
+                      })}
+                    </p>
                   </div>
                 </div>
               )}
