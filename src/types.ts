@@ -123,6 +123,7 @@ export interface ClaudeDesktopModelRoute {
   model: string;
   labelOverride?: string;
   supports1m?: boolean;
+  prefer1m?: boolean;
 }
 
 export type CodexChatThinkingParam =

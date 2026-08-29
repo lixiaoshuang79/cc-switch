@@ -386,6 +386,10 @@ pub struct ClaudeDesktopModelRoute {
     /// Claude Desktop 3P 识别的 1M 上下文能力标记。
     #[serde(rename = "supports1m", skip_serializing_if = "Option::is_none")]
     pub supports_1m: Option<bool>,
+    /// 默认条目（inferenceModels 列表第一条）默认选中 1M 变体。
+    /// 仅在 supports1m 同时为 true 时有效；非首条条目会被忽略。
+    #[serde(rename = "prefer1m", skip_serializing_if = "Option::is_none")]
+    pub prefer_1m: Option<bool>,
 }
 
 /// Codex Responses -> Chat Completions 的 reasoning 能力描述。
