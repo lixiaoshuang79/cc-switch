@@ -102,6 +102,7 @@ type RouteRow = {
   model: string;
   labelOverride: string;
   supports1m: boolean;
+  prefer1m: boolean;
 };
 
 type RouteRowValues = Omit<RouteRow, "rowId">;
@@ -185,6 +186,7 @@ function initialRouteRows(
         value.labelOverride ??
         (!isClaudeSafeRoute(route) ? value.model || route : ""),
       supports1m: value.supports1m ?? false,
+      prefer1m: value.prefer1m ?? false,
     });
   });
 }
@@ -203,6 +205,7 @@ function normalizeProxyRows(rows: RouteRow[]): RouteRow[] {
       model: match?.model ?? "",
       labelOverride: match?.labelOverride ?? "",
       supports1m: match?.supports1m ?? false,
+      prefer1m: match?.prefer1m ?? false,
     });
   });
 }
@@ -235,6 +238,7 @@ function defaultRouteRows(
       model: index === 0 ? defaultModel : "",
       labelOverride: "",
       supports1m: route.supports1m,
+      prefer1m: false,
     }),
   );
 }
@@ -440,6 +444,7 @@ export function ClaudeDesktopProviderForm({
               model: "",
               labelOverride: route.labelOverride ?? "",
               supports1m: route.supports1m,
+              prefer1m: false,
             }),
           )
         : [],
@@ -454,6 +459,7 @@ export function ClaudeDesktopProviderForm({
               model: r.upstreamModel,
               labelOverride: r.labelOverride ?? "",
               supports1m: r.supports1m,
+              prefer1m: false,
             }),
           ),
         ),
@@ -770,6 +776,8 @@ export function ClaudeDesktopProviderForm({
           route.labelOverride ||
           (effectiveMode === "proxy" ? route.model : undefined),
         supports1m: route.supports1m || undefined,
+        // prefer1m 只在声明了 1M 能力时写入；supports1m 为假时强制不写。
+        prefer1m: (route.supports1m && route.prefer1m) || undefined,
       };
       return acc;
     }, {});
@@ -1098,7 +1106,7 @@ export function ClaudeDesktopProviderForm({
                       </p>
                     </div>
 
-                    <div className="hidden grid-cols-[140px_1fr_1fr_116px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
+                    <div className="hidden grid-cols-[140px_1fr_1fr_116px_116px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
                       <span>
                         {t("claudeDesktop.routeModelLabel", {
                           defaultValue: "模型角色",
@@ -1117,6 +1125,11 @@ export function ClaudeDesktopProviderForm({
                       <span>
                         {t("claudeDesktop.supports1mLabel", {
                           defaultValue: "声明支持 1M",
+                        })}
+                      </span>
+                      <span>
+                        {t("claudeDesktop.prefer1mLabel", {
+                          defaultValue: "默认选 1M",
                         })}
                       </span>
                     </div>
@@ -1150,7 +1163,7 @@ export function ClaudeDesktopProviderForm({
                       return (
                         <div
                           key={route.rowId}
-                          className="grid grid-cols-1 gap-2 md:grid-cols-[140px_1fr_1fr_116px]"
+                          className="grid grid-cols-1 gap-2 md:grid-cols-[140px_1fr_1fr_116px_116px]"
                         >
                           <div className="flex h-9 items-center rounded-md border border-input bg-muted px-3 text-sm font-medium text-muted-foreground">
                             {roleLabel}
@@ -1193,11 +1206,34 @@ export function ClaudeDesktopProviderForm({
                               onCheckedChange={(checked) =>
                                 updateRoute(index, {
                                   supports1m: checked === true,
+                                  // 取消 1M 声明时同时取消默认选 1M，避免残留无效配置
+                                  prefer1m:
+                                    checked === true ? route.prefer1m : false,
                                 })
                               }
                             />
                             {t("claudeDesktop.supports1mShort", {
                               defaultValue: "1M",
+                            })}
+                          </label>
+                          <label
+                            className={
+                              route.supports1m
+                                ? "flex h-9 items-center gap-2 text-sm text-muted-foreground"
+                                : "flex h-9 cursor-not-allowed items-center gap-2 text-sm text-muted-foreground opacity-50"
+                            }
+                          >
+                            <Checkbox
+                              checked={route.supports1m && route.prefer1m}
+                              disabled={!route.supports1m}
+                              onCheckedChange={(checked) =>
+                                updateRoute(index, {
+                                  prefer1m: checked === true,
+                                })
+                              }
+                            />
+                            {t("claudeDesktop.prefer1mShort", {
+                              defaultValue: "默认 1M",
                             })}
                           </label>
                         </div>
@@ -1244,6 +1280,7 @@ export function ClaudeDesktopProviderForm({
                             model: "",
                             labelOverride: "",
                             supports1m: false,
+                            prefer1m: false,
                           }),
                         ]),
                       t("claudeDesktop.addModel", {
@@ -1264,7 +1301,7 @@ export function ClaudeDesktopProviderForm({
                       {routes.map((route, index) => (
                         <div
                           key={route.rowId}
-                          className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_116px_36px]"
+                          className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_116px_116px_36px]"
                         >
                           <div className="flex gap-1">
                             <Input
@@ -1292,11 +1329,34 @@ export function ClaudeDesktopProviderForm({
                               onCheckedChange={(checked) =>
                                 updateRoute(index, {
                                   supports1m: checked === true,
+                                  // 取消 1M 声明时同时取消默认选 1M，避免残留无效配置
+                                  prefer1m:
+                                    checked === true ? route.prefer1m : false,
                                 })
                               }
                             />
                             {t("claudeDesktop.supports1mShort", {
                               defaultValue: "1M",
+                            })}
+                          </label>
+                          <label
+                            className={
+                              route.supports1m
+                                ? "flex h-9 items-center gap-2 text-sm text-muted-foreground"
+                                : "flex h-9 cursor-not-allowed items-center gap-2 text-sm text-muted-foreground opacity-50"
+                            }
+                          >
+                            <Checkbox
+                              checked={route.supports1m && route.prefer1m}
+                              disabled={!route.supports1m}
+                              onCheckedChange={(checked) =>
+                                updateRoute(index, {
+                                  prefer1m: checked === true,
+                                })
+                              }
+                            />
+                            {t("claudeDesktop.prefer1mShort", {
+                              defaultValue: "默认 1M",
                             })}
                           </label>
                           <Button

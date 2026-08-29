@@ -116,6 +116,7 @@ pub struct ResolvedModelRoute {
     pub upstream_model: String,
     pub label_override: Option<String>,
     pub supports_1m: bool,
+    pub prefer_1m: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +124,7 @@ struct InferenceModelSpec {
     name: String,
     label_override: Option<String>,
     supports_1m: bool,
+    prefer_1m: bool,
 }
 
 pub fn apply_provider(db: &Database, provider: &Provider) -> Result<(), AppError> {
@@ -260,14 +262,22 @@ pub fn is_claude_safe_model_id(model: &str) -> bool {
         })
 }
 
-fn inference_model_json(spec: &InferenceModelSpec) -> Value {
-    if spec.supports_1m || spec.label_override.is_some() {
+fn inference_model_json(spec: &InferenceModelSpec, is_default: bool) -> Value {
+    // prefer1m 只在默认条目（inferenceModels 第一条）上生效：协议规定
+    // prefer1m 仅对列表第一条目（默认模型）有意义，非首条即使配置了也不写。
+    // 另须 supports1m 为 true 才有意义（解析阶段已保证 prefer_1m 隐含
+    // supports_1m，这里再双保险一次）。
+    let prefer_1m = is_default && spec.supports_1m && spec.prefer_1m;
+    if spec.supports_1m || spec.label_override.is_some() || prefer_1m {
         let mut item = json!({ "name": spec.name });
         if let Some(label_override) = spec.label_override.as_deref() {
             item["labelOverride"] = json!(label_override);
         }
         if spec.supports_1m {
             item["supports1m"] = json!(true);
+        }
+        if prefer_1m {
+            item["prefer1m"] = json!(true);
         }
         item
     } else {
@@ -507,6 +517,9 @@ fn direct_inference_model_specs(provider: &Provider) -> Result<Vec<InferenceMode
     let mut result = Vec::new();
     for (route_id, route) in routes {
         let supports_1m = route.supports_1m.unwrap_or(false);
+        // prefer1m 只在声明了 1M 能力时有效；未声明 supports1m 时强制关闭，
+        // 避免把无效的 prefer1m 写进 profile。
+        let prefer_1m = supports_1m && route.prefer_1m.unwrap_or(false);
         let route_id = route_id.trim();
         if route_id.is_empty() {
             continue;
@@ -543,6 +556,7 @@ fn direct_inference_model_specs(provider: &Provider) -> Result<Vec<InferenceMode
                 .filter(|value| !value.is_empty())
                 .map(str::to_string),
             supports_1m,
+            prefer_1m,
         });
     }
 
@@ -581,6 +595,8 @@ pub fn proxy_model_routes(provider: &Provider) -> Result<Vec<ResolvedModelRoute>
     entries.sort_by_key(|(left, _)| *left);
     for (route_id, route) in entries {
         let supports_1m = route.supports_1m.unwrap_or(false);
+        // prefer1m 只在声明了 1M 能力时有效；未声明 supports1m 时强制关闭。
+        let prefer_1m = supports_1m && route.prefer_1m.unwrap_or(false);
         let route_id = route_id.trim();
         let upstream_model = route.model.trim();
         if route_id.is_empty() || upstream_model.is_empty() {
@@ -604,6 +620,7 @@ pub fn proxy_model_routes(provider: &Provider) -> Result<Vec<ResolvedModelRoute>
                     (!is_claude_safe_model_id(route_id)).then(|| upstream_model.to_string())
                 }),
             supports_1m,
+            prefer_1m,
         });
     }
 
@@ -1037,6 +1054,7 @@ fn apply_provider_to_paths_inner(
                     name: route.route_id.clone(),
                     label_override: route.label_override.clone(),
                     supports_1m: route.supports_1m,
+                    prefer_1m: route.prefer_1m,
                 })
                 .collect::<Vec<_>>();
             build_gateway_profile(&base_url, &api_key, Some(model_specs.as_slice()))
@@ -1079,8 +1097,15 @@ fn build_gateway_profile(
     });
 
     if let Some(model_specs) = model_specs {
-        profile["inferenceModels"] =
-            Value::Array(model_specs.iter().map(inference_model_json).collect());
+        // inferenceModels 列表第一条目是 Claude Desktop 的默认模型，只有它
+        // 可以携带 prefer1m；其余条目即使配置了 prefer_1m 也不写。
+        profile["inferenceModels"] = Value::Array(
+            model_specs
+                .iter()
+                .enumerate()
+                .map(|(index, spec)| inference_model_json(spec, index == 0))
+                .collect(),
+        );
     }
 
     profile
@@ -1448,6 +1473,7 @@ mod tests {
                     model: "kimi-k2".to_string(),
                     label_override: Some("Kimi K2".to_string()),
                     supports_1m: Some(true),
+                    prefer_1m: None,
                 },
             )]),
             ..Default::default()
@@ -1473,6 +1499,7 @@ mod tests {
                     model: "mimo-v2.5-pro".to_string(),
                     label_override: Some("MiMo v2.5 Pro".to_string()),
                     supports_1m: Some(true),
+                    prefer_1m: None,
                 },
             )]),
             ..Default::default()
@@ -1501,6 +1528,7 @@ mod tests {
                     model: "gpt-5.4".to_string(),
                     label_override: Some("GPT-5.4".to_string()),
                     supports_1m: Some(false),
+                    prefer_1m: None,
                 },
             )]),
             ..Default::default()
@@ -1519,6 +1547,7 @@ mod tests {
                     model: "claude-sonnet-4-6".to_string(),
                     label_override: None,
                     supports_1m: Some(true),
+                    prefer_1m: None,
                 },
             )]),
             ..Default::default()
@@ -1594,6 +1623,158 @@ mod tests {
 
         let err = validate_provider(&provider).expect_err("direct mapping should fail");
         assert!(err.to_string().contains("本地路由模式"));
+    }
+
+    #[test]
+    fn claude_desktop_direct_apply_writes_prefer1m_on_default_entry() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        let mut provider = direct_provider_with_models("direct-prefer-default");
+        let route = provider
+            .meta
+            .as_mut()
+            .expect("meta")
+            .claude_desktop_model_routes
+            .get_mut("claude-sonnet-4-6")
+            .expect("route");
+        route.supports_1m = Some(true);
+        route.prefer_1m = Some(true);
+        let db = test_db();
+
+        apply_provider_to_paths(&db, &provider, &paths).expect("apply provider");
+
+        let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
+        assert_eq!(
+            profile["inferenceModels"],
+            json!([{ "name": "claude-sonnet-4-6", "supports1m": true, "prefer1m": true }])
+        );
+    }
+
+    #[test]
+    fn claude_desktop_direct_drops_prefer1m_without_supports1m() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        let mut provider = direct_provider_with_models("direct-prefer-invalid");
+        let route = provider
+            .meta
+            .as_mut()
+            .expect("meta")
+            .claude_desktop_model_routes
+            .get_mut("claude-sonnet-4-6")
+            .expect("route");
+        route.supports_1m = Some(false);
+        route.prefer_1m = Some(true);
+        let db = test_db();
+
+        apply_provider_to_paths(&db, &provider, &paths).expect("apply provider");
+
+        let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
+        // 未声明 supports1m 时 prefer1m 必须被丢弃，条目回到纯字符串形态。
+        assert_eq!(profile["inferenceModels"], json!(["claude-sonnet-4-6"]));
+    }
+
+    #[test]
+    fn claude_desktop_direct_drops_prefer1m_on_non_default_entry() {
+        // 直连模式按名称排序：claude-haiku-4-5 位于 claude-sonnet-4-6 之前，
+        // 首条目（默认条目）是 haiku；sonnet 虽配置了 prefer1m 也不得写入。
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        let mut provider = direct_provider_with_models("direct-prefer-nondefault");
+        provider.meta = Some(ProviderMeta {
+            claude_desktop_mode: Some(ClaudeDesktopMode::Direct),
+            api_format: Some("anthropic".to_string()),
+            claude_desktop_model_routes: std::collections::HashMap::from([
+                (
+                    "claude-haiku-4-5".to_string(),
+                    ClaudeDesktopModelRoute {
+                        model: "claude-haiku-4-5".to_string(),
+                        label_override: None,
+                        supports_1m: Some(true),
+                        prefer_1m: None,
+                    },
+                ),
+                (
+                    "claude-sonnet-4-6".to_string(),
+                    ClaudeDesktopModelRoute {
+                        model: "claude-sonnet-4-6".to_string(),
+                        label_override: None,
+                        supports_1m: Some(true),
+                        prefer_1m: Some(true),
+                    },
+                ),
+            ]),
+            ..Default::default()
+        });
+        let db = test_db();
+
+        apply_provider_to_paths(&db, &provider, &paths).expect("apply provider");
+
+        let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
+        assert_eq!(
+            profile["inferenceModels"],
+            json!([
+                { "name": "claude-haiku-4-5", "supports1m": true },
+                { "name": "claude-sonnet-4-6", "supports1m": true }
+            ])
+        );
+        assert!(profile["inferenceModels"][1].get("prefer1m").is_none());
+    }
+
+    #[test]
+    fn claude_desktop_proxy_writes_prefer1m_on_first_entry_only() {
+        // proxy 模式按 route_id 排序：claude-haiku-4-5 位于 claude-sonnet-4-6
+        // 之前，首条目（默认条目）是 haiku；只有它携带 prefer1m，sonnet 的
+        // prefer1m 配置即使存在也不写。
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        let mut provider = proxy_provider("proxy-prefer-first");
+        provider.meta = Some(ProviderMeta {
+            claude_desktop_mode: Some(ClaudeDesktopMode::Proxy),
+            api_format: Some("openai_chat".to_string()),
+            claude_desktop_model_routes: std::collections::HashMap::from([
+                (
+                    "claude-haiku-4-5".to_string(),
+                    ClaudeDesktopModelRoute {
+                        model: "upstream-haiku".to_string(),
+                        label_override: Some("Haiku".to_string()),
+                        supports_1m: Some(true),
+                        prefer_1m: Some(true),
+                    },
+                ),
+                (
+                    "claude-sonnet-4-6".to_string(),
+                    ClaudeDesktopModelRoute {
+                        model: "upstream-sonnet".to_string(),
+                        label_override: Some("Sonnet".to_string()),
+                        supports_1m: Some(true),
+                        prefer_1m: Some(true),
+                    },
+                ),
+            ]),
+            ..Default::default()
+        });
+        let db = test_db();
+
+        apply_provider_to_paths(&db, &provider, &paths).expect("apply proxy provider");
+
+        let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
+        assert_eq!(
+            profile["inferenceModels"],
+            json!([
+                {
+                    "name": "claude-haiku-4-5",
+                    "labelOverride": "Haiku",
+                    "supports1m": true,
+                    "prefer1m": true
+                },
+                {
+                    "name": "claude-sonnet-4-6",
+                    "labelOverride": "Sonnet",
+                    "supports1m": true
+                }
+            ])
+        );
+        assert!(profile["inferenceModels"][1].get("prefer1m").is_none());
     }
 
     #[test]
@@ -1754,6 +1935,7 @@ mod tests {
                     model: "deepseek-v4-pro".to_string(),
                     label_override: None,
                     supports_1m: Some(true),
+                    prefer_1m: None,
                 },
             ),
             (
@@ -1762,6 +1944,7 @@ mod tests {
                     model: "deepseek-v4-pro".to_string(),
                     label_override: None,
                     supports_1m: Some(true),
+                    prefer_1m: None,
                 },
             ),
             (
@@ -1770,6 +1953,7 @@ mod tests {
                     model: "deepseek-v4-flash".to_string(),
                     label_override: None,
                     supports_1m: Some(true),
+                    prefer_1m: None,
                 },
             ),
         ]);
@@ -1810,6 +1994,7 @@ mod tests {
                     model: "upstream-opus".to_string(),
                     label_override: None,
                     supports_1m: Some(true),
+                    prefer_1m: None,
                 },
             ),
             (
@@ -1818,6 +2003,7 @@ mod tests {
                     model: "upstream-sonnet".to_string(),
                     label_override: None,
                     supports_1m: Some(true),
+                    prefer_1m: None,
                 },
             ),
         ]);
@@ -1859,6 +2045,7 @@ mod tests {
                 model: "upstream-sonnet".to_string(),
                 label_override: None,
                 supports_1m: Some(true),
+                prefer_1m: None,
             },
         )]);
 
@@ -1886,6 +2073,7 @@ mod tests {
                     model: "upstream-opus".to_string(),
                     label_override: None,
                     supports_1m: Some(true),
+                    prefer_1m: None,
                 },
             ),
             (
@@ -1894,6 +2082,7 @@ mod tests {
                     model: "upstream-fable".to_string(),
                     label_override: None,
                     supports_1m: Some(true),
+                    prefer_1m: None,
                 },
             ),
         ]);
@@ -1924,6 +2113,7 @@ mod tests {
                 model: "upstream-opus-new".to_string(),
                 label_override: None,
                 supports_1m: Some(true),
+                prefer_1m: None,
             },
         )]);
         provider
@@ -1945,6 +2135,7 @@ mod tests {
                 model: "upstream-opus-legacy".to_string(),
                 label_override: None,
                 supports_1m: Some(true),
+                prefer_1m: None,
             },
         )]);
         provider
@@ -2068,6 +2259,7 @@ mod tests {
                         model: "deepseek-v4-pro".to_string(),
                         label_override: None,
                         supports_1m: Some(true),
+                        prefer_1m: None,
                     },
                 ),
                 (
@@ -2076,6 +2268,7 @@ mod tests {
                         model: "legacy-upstream".to_string(),
                         label_override: None,
                         supports_1m: Some(false),
+                        prefer_1m: None,
                     },
                 ),
                 (
@@ -2084,6 +2277,7 @@ mod tests {
                         model: "claude-sonnet-5".to_string(),
                         label_override: None,
                         supports_1m: Some(false),
+                        prefer_1m: None,
                     },
                 ),
             ]),
@@ -2136,6 +2330,7 @@ mod tests {
                     model: "upstream-sonnet".to_string(),
                     label_override: None,
                     supports_1m: Some(true),
+                    prefer_1m: None,
                 },
             ),
             (
@@ -2144,6 +2339,7 @@ mod tests {
                     model: "upstream-opus".to_string(),
                     label_override: None,
                     supports_1m: Some(true),
+                    prefer_1m: None,
                 },
             ),
         ]);
