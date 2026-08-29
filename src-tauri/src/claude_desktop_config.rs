@@ -713,6 +713,13 @@ pub fn model_list_response(provider: &Provider) -> Result<Value, AppError> {
 }
 
 pub fn map_proxy_request_model(mut body: Value, provider: &Provider) -> Result<Value, AppError> {
+    // 上游网关对请求体有硬限制（如内网 Menshen 6MB）。多图长对话把图片
+    // base64 全量内嵌在每次请求里，先压缩大图避免顶爆上游限制。
+    let image_compressed = crate::proxy::image_compression::compress_large_images(&mut body);
+    if image_compressed > 0 {
+        log::info!("[ClaudeDesktop] 已压缩 {image_compressed} 张大图以适配上游请求体限制");
+    }
+
     let requested_raw = body
         .get("model")
         .and_then(Value::as_str)
