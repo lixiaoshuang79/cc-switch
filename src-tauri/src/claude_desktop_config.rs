@@ -560,11 +560,15 @@ fn direct_inference_model_specs(provider: &Provider) -> Result<Vec<InferenceMode
         });
     }
 
-    // Sort supports_1m=true first within each name so the subsequent dedup_by
-    // (which keeps the first occurrence) preserves the 1M-capable variant.
+    // 固定档位顺序：sonnet → opus → haiku → fable（Claude 官方层级，主档
+    // sonnet 第一，inferenceModels 首条目即默认条目），未知角色按原有相对
+    // 顺序排在最后。同一名称内 supports_1m=true 优先，保证随后 dedup_by
+    // 保留 1M 变体。
     result.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
+        claude_role_rank(&a.name)
+            .unwrap_or(usize::MAX)
+            .cmp(&claude_role_rank(&b.name).unwrap_or(usize::MAX))
+            .then_with(|| a.name.cmp(&b.name))
             .then_with(|| b.supports_1m.cmp(&a.supports_1m))
     });
     result.dedup_by(|a, b| a.name == b.name);
@@ -624,7 +628,15 @@ pub fn proxy_model_routes(provider: &Provider) -> Result<Vec<ResolvedModelRoute>
         });
     }
 
-    result.sort_by(|a, b| a.route_id.cmp(&b.route_id));
+    // 固定档位顺序：sonnet → opus → haiku → fable（主档 sonnet 第一，
+    // inferenceModels 首条目即默认条目，prefer1m 才能落在主力档），未知角色
+    // 按原有相对顺序排在最后。稳定排序保持同档内的名称序不变，因此
+    // map_proxy_request_model 的角色关键词回落（取同档第一条）行为不变。
+    result.sort_by(|a, b| {
+        claude_role_rank(&a.route_id)
+            .unwrap_or(usize::MAX)
+            .cmp(&claude_role_rank(&b.route_id).unwrap_or(usize::MAX))
+    });
     result.dedup_by(|a, b| a.route_id == b.route_id);
 
     if result.is_empty() {
@@ -860,6 +872,18 @@ fn claude_role_keyword(model: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// inferenceModels 写入顺序的档位权重：Claude 官方层级主档 sonnet 第一，
+/// 其后 opus → haiku → fable。未知角色返回 None，排序时排在最后（稳定排序
+/// 保持其原有相对顺序）。
+const CLAUDE_DESKTOP_ROLE_ORDER: [&str; 4] = ["sonnet", "opus", "haiku", "fable"];
+
+fn claude_role_rank(model_id: &str) -> Option<usize> {
+    let role = claude_role_keyword(model_id)?;
+    CLAUDE_DESKTOP_ROLE_ORDER
+        .iter()
+        .position(|candidate| *candidate == role)
 }
 
 fn should_normalize_mimo_anthropic_thinking_history(
@@ -1555,6 +1579,23 @@ mod tests {
         provider
     }
 
+    /// 构造一条无 label 的模型路由条目，供顺序类测试拼装多档位映射。
+    fn route_map_entry(
+        route_id: &str,
+        model: &str,
+        supports_1m: bool,
+    ) -> (String, ClaudeDesktopModelRoute) {
+        (
+            route_id.to_string(),
+            ClaudeDesktopModelRoute {
+                model: model.to_string(),
+                label_override: None,
+                supports_1m: Some(supports_1m),
+                prefer_1m: None,
+            },
+        )
+    }
+
     #[test]
     fn claude_desktop_apply_writes_3p_profile_and_meta() {
         let temp = TempDir::new().expect("tempdir");
@@ -1675,8 +1716,8 @@ mod tests {
 
     #[test]
     fn claude_desktop_direct_drops_prefer1m_on_non_default_entry() {
-        // 直连模式按名称排序：claude-haiku-4-5 位于 claude-sonnet-4-6 之前，
-        // 首条目（默认条目）是 haiku；sonnet 虽配置了 prefer1m 也不得写入。
+        // 固定档位顺序下首条目（默认条目）是 sonnet 档；haiku 档虽配置了
+        // prefer1m 也因非首条不得写入。
         let temp = TempDir::new().expect("tempdir");
         let paths = test_paths(temp.path());
         let mut provider = direct_provider_with_models("direct-prefer-nondefault");
@@ -1690,7 +1731,7 @@ mod tests {
                         model: "claude-haiku-4-5".to_string(),
                         label_override: None,
                         supports_1m: Some(true),
-                        prefer_1m: None,
+                        prefer_1m: Some(true),
                     },
                 ),
                 (
@@ -1699,7 +1740,7 @@ mod tests {
                         model: "claude-sonnet-4-6".to_string(),
                         label_override: None,
                         supports_1m: Some(true),
-                        prefer_1m: Some(true),
+                        prefer_1m: None,
                     },
                 ),
             ]),
@@ -1713,8 +1754,8 @@ mod tests {
         assert_eq!(
             profile["inferenceModels"],
             json!([
-                { "name": "claude-haiku-4-5", "supports1m": true },
-                { "name": "claude-sonnet-4-6", "supports1m": true }
+                { "name": "claude-sonnet-4-6", "supports1m": true },
+                { "name": "claude-haiku-4-5", "supports1m": true }
             ])
         );
         assert!(profile["inferenceModels"][1].get("prefer1m").is_none());
@@ -1722,9 +1763,8 @@ mod tests {
 
     #[test]
     fn claude_desktop_proxy_writes_prefer1m_on_first_entry_only() {
-        // proxy 模式按 route_id 排序：claude-haiku-4-5 位于 claude-sonnet-4-6
-        // 之前，首条目（默认条目）是 haiku；只有它携带 prefer1m，sonnet 的
-        // prefer1m 配置即使存在也不写。
+        // 固定档位顺序下首条目（默认条目）是 sonnet 档：sonnet 的 prefer1m
+        // 会写入；haiku 的 prefer1m 配置即使存在也不写。
         let temp = TempDir::new().expect("tempdir");
         let paths = test_paths(temp.path());
         let mut provider = proxy_provider("proxy-prefer-first");
@@ -1762,19 +1802,126 @@ mod tests {
             profile["inferenceModels"],
             json!([
                 {
-                    "name": "claude-haiku-4-5",
-                    "labelOverride": "Haiku",
+                    "name": "claude-sonnet-4-6",
+                    "labelOverride": "Sonnet",
                     "supports1m": true,
                     "prefer1m": true
                 },
                 {
-                    "name": "claude-sonnet-4-6",
-                    "labelOverride": "Sonnet",
+                    "name": "claude-haiku-4-5",
+                    "labelOverride": "Haiku",
                     "supports1m": true
                 }
             ])
         );
         assert!(profile["inferenceModels"][1].get("prefer1m").is_none());
+    }
+
+    #[test]
+    fn claude_desktop_proxy_orders_all_four_tiers_sonnet_first() {
+        // 四档齐全时 inferenceModels 必须按官方层级写：sonnet 主档第一，
+        // 其后 opus → haiku → fable（首条目即 Claude Desktop 默认条目）。
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        let mut provider = proxy_provider("proxy-order-full");
+        provider.meta = Some(ProviderMeta {
+            claude_desktop_mode: Some(ClaudeDesktopMode::Proxy),
+            api_format: Some("openai_chat".to_string()),
+            claude_desktop_model_routes: std::collections::HashMap::from([
+                route_map_entry("claude-fable-5", "upstream-fable", false),
+                route_map_entry("claude-haiku-4-5", "upstream-haiku", false),
+                route_map_entry("claude-opus-5", "upstream-opus", false),
+                route_map_entry("claude-sonnet-5", "upstream-sonnet", false),
+            ]),
+            ..Default::default()
+        });
+        let db = test_db();
+
+        apply_provider_to_paths(&db, &provider, &paths).expect("apply proxy provider");
+
+        let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
+        assert_eq!(
+            profile["inferenceModels"],
+            json!([
+                "claude-sonnet-5",
+                "claude-opus-5",
+                "claude-haiku-4-5",
+                "claude-fable-5"
+            ])
+        );
+    }
+
+    #[test]
+    fn claude_desktop_proxy_orders_partial_tiers_with_gaps_skipped() {
+        // 只配置部分档位时按固定层级顺序排列、缺档跳过：opus → haiku → fable。
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        let mut provider = proxy_provider("proxy-order-partial");
+        provider.meta = Some(ProviderMeta {
+            claude_desktop_mode: Some(ClaudeDesktopMode::Proxy),
+            api_format: Some("openai_chat".to_string()),
+            claude_desktop_model_routes: std::collections::HashMap::from([
+                route_map_entry("claude-fable-5", "upstream-fable", false),
+                route_map_entry("claude-haiku-4-5", "upstream-haiku", false),
+                route_map_entry("claude-opus-5", "upstream-opus", false),
+            ]),
+            ..Default::default()
+        });
+        let db = test_db();
+
+        apply_provider_to_paths(&db, &provider, &paths).expect("apply proxy provider");
+
+        let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
+        assert_eq!(
+            profile["inferenceModels"],
+            json!(["claude-opus-5", "claude-haiku-4-5", "claude-fable-5"])
+        );
+    }
+
+    #[test]
+    fn claude_desktop_direct_orders_all_four_tiers_sonnet_first() {
+        // 直连模式同样按官方层级写：sonnet → opus → haiku → fable，
+        // 不再按模型名字母序（原字母序会把 fable 排到第一）。
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        let mut provider = direct_provider_with_models("direct-order-full");
+        provider.meta = Some(ProviderMeta {
+            claude_desktop_mode: Some(ClaudeDesktopMode::Direct),
+            api_format: Some("anthropic".to_string()),
+            claude_desktop_model_routes: std::collections::HashMap::from([
+                route_map_entry("claude-fable-5", "claude-fable-5", false),
+                route_map_entry("claude-haiku-4-5", "claude-haiku-4-5", false),
+                route_map_entry("claude-opus-5", "claude-opus-5", false),
+                route_map_entry("claude-sonnet-5", "claude-sonnet-5", false),
+            ]),
+            ..Default::default()
+        });
+        let db = test_db();
+
+        apply_provider_to_paths(&db, &provider, &paths).expect("apply provider");
+
+        let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
+        assert_eq!(
+            profile["inferenceModels"],
+            json!([
+                "claude-sonnet-5",
+                "claude-opus-5",
+                "claude-haiku-4-5",
+                "claude-fable-5"
+            ])
+        );
+    }
+
+    #[test]
+    fn claude_role_rank_maps_official_tiers_and_leaves_unknown_last() {
+        assert_eq!(claude_role_rank("claude-sonnet-5"), Some(0));
+        assert_eq!(claude_role_rank("anthropic/claude-sonnet-4-6"), Some(0));
+        assert_eq!(claude_role_rank("claude-opus-5"), Some(1));
+        assert_eq!(claude_role_rank("claude-haiku-4-5"), Some(2));
+        assert_eq!(claude_role_rank("claude-fable-5"), Some(3));
+        // 未知角色无固定档位，排序时以 usize::MAX 排在最后。
+        assert_eq!(claude_role_rank("claude-mythos-2"), None);
+        assert_eq!(claude_role_rank("gpt-5"), None);
     }
 
     #[test]
