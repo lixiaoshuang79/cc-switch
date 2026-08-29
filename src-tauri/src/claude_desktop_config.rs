@@ -807,15 +807,16 @@ fn apply_vision_routing(body: &mut Value, provider: &Provider, upstream_model: &
 ///
 /// 图片出现在 `messages[].content[]` 的 `{"type": "image", ...}` 块中，
 /// 也可能内嵌在 tool_result 的内容里，因此对 messages 子树做递归扫描。
+/// tool_use 的 input 是业务参数，不参与检测（见 P2 修复：避免业务数据里
+/// type: "image" 之类的字段被误判为发图）。
 fn body_contains_image(body: &Value) -> bool {
     fn walk(value: &Value) -> bool {
         match value {
-            Value::Object(map) => {
-                if map.get("type").and_then(Value::as_str) == Some("image") {
-                    return true;
-                }
-                map.values().any(walk)
-            }
+            Value::Object(map) => match map.get("type").and_then(Value::as_str) {
+                Some("image") => true,
+                Some("tool_use") => false,
+                _ => map.values().any(walk),
+            },
             Value::Array(items) => items.iter().any(walk),
             _ => false,
         }
@@ -2063,6 +2064,22 @@ mod tests {
         });
         let mapped = map_proxy_request_model(tool_body, &vision_provider).expect("map route");
         assert_eq!(mapped["model"], json!("qwen3.8-max"));
+
+        // tool_use 的业务参数里恰好出现 type: "image" 字段不应触发路由（P2 修复）
+        let tool_use_body = json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [{
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu1",
+                    "name": "process_record",
+                    "input": {"kind": "image_meta", "type": "image", "url": "https://example.com/x.png"}
+                }]
+            }]
+        });
+        let mapped = map_proxy_request_model(tool_use_body, &vision_provider).expect("map route");
+        assert_eq!(mapped["model"], json!("kimi-k2"));
     }
 
     #[test]
