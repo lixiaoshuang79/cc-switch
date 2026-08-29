@@ -184,6 +184,8 @@ export interface ProviderMeta {
   claudeDesktopModelRoutes?: Record<string, ClaudeDesktopModelRoute>;
   // Claude Desktop 视觉自动路由：请求包含图片时自动改用该模型（留空不启用）
   claudeDesktopVisionModel?: string;
+  // Codex 视觉自动路由：请求包含图片时自动改用该模型（留空不启用）
+  codexVisionModel?: string;
   // 用量查询脚本配置
   usage_script?: UsageScript;
   // 请求地址管理：测速后自动选择最佳端点

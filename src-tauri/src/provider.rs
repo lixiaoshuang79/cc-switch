@@ -462,6 +462,13 @@ pub struct ProviderMeta {
         skip_serializing_if = "Option::is_none"
     )]
     pub claude_desktop_vision_model: Option<String>,
+    /// Codex 视觉自动路由：请求包含图片时自动改用该上游模型（留空不启用）
+    #[serde(
+        default,
+        rename = "codexVisionModel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub codex_vision_model: Option<String>,
     /// 用量查询脚本配置
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_script: Option<UsageScript>,

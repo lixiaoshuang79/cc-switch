@@ -1543,6 +1543,8 @@
     "promptCacheRoutingEnabled": "开启",
     "promptCacheRoutingDisabled": "关闭",
     "promptCacheRoutingHint": "自动模式仅对已确认兼容的上游发送 prompt_cache_key；开启可用于其他兼容网关，关闭可避免严格网关因未知字段返回 400。只使用客户端提供的稳定会话 ID。",
+    "visionModelLabel": "视觉模型（可选）",
+    "visionModelHint": "消息包含图片时自动改用该模型（如 qwen3.8-max、glm-4.6v），纯文本请求不受影响——无需手动切换模型即可发图。留空 = 不启用。",
     "upstreamModelName": "上游模型名称",
     "upstreamModelNameHint": "Chat 格式下这里填写真实上游模型；路由会把 Codex 的 Responses 请求转换为 Chat Completions 并保持该模型。",
     "modelNamePlaceholder": "例如: gpt-5-codex",

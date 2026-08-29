@@ -409,6 +409,42 @@ pub fn apply_codex_upstream_model(provider: &Provider, body: &mut JsonValue) -> 
     Some(upstream_model)
 }
 
+/// Codex 视觉自动路由：供应商 meta.codexVisionModel 非空且请求体包含图片块时，
+/// 把请求模型替换为视觉模型。纯文本请求不受影响，用户无需在 Codex 里手动切换
+/// 模型即可发图，且带图对话与纯文本对话能无缝连续。
+///
+/// 替换必须发生在 Codex 模型映射（apply_codex_upstream_model）之后，因此视觉
+/// 模型名将直接作为上游模型名发出，不会再被默认模型覆盖。图片检测复用
+/// media_sanitizer 的 `contains_image_blocks`，同时覆盖 OpenAI Chat Completions
+/// （messages[].content[] 的 image_url 块）与 Responses（input[] 的 input_image
+/// 块）两种请求体格式；流式与非流式请求走同一条路径。
+///
+/// 返回替换后的模型名；未发生替换（未配置 / 纯文本 / 已是视觉模型）时返回 None。
+pub fn apply_codex_vision_routing(provider: &Provider, body: &mut JsonValue) -> Option<String> {
+    let vision_model = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.codex_vision_model.as_deref())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())?;
+
+    let current_model = body
+        .get("model")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToString::to_string)?;
+
+    if vision_model == current_model || !crate::proxy::media_sanitizer::contains_image_blocks(body)
+    {
+        return None;
+    }
+
+    body["model"] = JsonValue::String(vision_model.to_string());
+    log::info!("[Codex] 视觉自动路由: {current_model} -> {vision_model}");
+    Some(vision_model.to_string())
+}
+
 pub fn resolve_codex_chat_reasoning_config(
     provider: &Provider,
     body: &JsonValue,
@@ -1697,6 +1733,219 @@ wire_api = "responses"
 
         assert_eq!(upstream_model.as_deref(), Some("kimi-k2"));
         assert_eq!(body.get("model").and_then(|v| v.as_str()), Some("kimi-k2"));
+    }
+
+    #[test]
+    fn test_codex_vision_routing_chat_completions_image_url() {
+        // OpenAI Chat Completions 体：messages[].content[] 里的 image_url 块 → 替换
+        let mut provider = create_provider(json!({}));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_vision_model: Some("qwen3.8-max".to_string()),
+            ..Default::default()
+        });
+        let mut body = json!({
+            "model": "deepseek-v4-pro",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "这张图里有什么？" },
+                        {
+                            "type": "image_url",
+                            "image_url": { "url": "data:image/png;base64,AAAA" }
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let replaced = apply_codex_vision_routing(&provider, &mut body);
+
+        assert_eq!(replaced.as_deref(), Some("qwen3.8-max"));
+        assert_eq!(
+            body.get("model").and_then(|v| v.as_str()),
+            Some("qwen3.8-max")
+        );
+    }
+
+    #[test]
+    fn test_codex_vision_routing_responses_input_image() {
+        // OpenAI Responses 体：input[] 里 message content 的 input_image 块 → 替换
+        let mut provider = create_provider(json!({}));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_vision_model: Some("glm-5.2".to_string()),
+            ..Default::default()
+        });
+        let mut body = json!({
+            "model": "deepseek-v4-pro",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        { "type": "input_text", "text": "这是什么？" },
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/jpeg;base64,BBBB",
+                            "detail": "high"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let replaced = apply_codex_vision_routing(&provider, &mut body);
+
+        assert_eq!(replaced.as_deref(), Some("glm-5.2"));
+        assert_eq!(body.get("model").and_then(|v| v.as_str()), Some("glm-5.2"));
+    }
+
+    #[test]
+    fn test_codex_vision_routing_pure_text_untouched() {
+        // 纯文本请求（Responses 与 Chat 两种体）都不替换
+        let mut provider = create_provider(json!({}));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_vision_model: Some("qwen3.8-max".to_string()),
+            ..Default::default()
+        });
+
+        let mut responses_body = json!({
+            "model": "deepseek-v4-pro",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "你好" }]
+                }
+            ]
+        });
+        assert_eq!(
+            apply_codex_vision_routing(&provider, &mut responses_body),
+            None
+        );
+        assert_eq!(
+            responses_body.get("model").and_then(|v| v.as_str()),
+            Some("deepseek-v4-pro")
+        );
+
+        let mut chat_body = json!({
+            "model": "deepseek-v4-pro",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "你好" }]
+                }
+            ]
+        });
+        assert_eq!(apply_codex_vision_routing(&provider, &mut chat_body), None);
+        assert_eq!(
+            chat_body.get("model").and_then(|v| v.as_str()),
+            Some("deepseek-v4-pro")
+        );
+    }
+
+    #[test]
+    fn test_codex_vision_routing_disabled_without_meta() {
+        // 未配置 codexVisionModel → 含图请求也不替换
+        let provider = create_provider(json!({}));
+        let mut body = json!({
+            "model": "deepseek-v4-pro",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        { "type": "input_text", "text": "看图" },
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,CCCC"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        assert_eq!(apply_codex_vision_routing(&provider, &mut body), None);
+        assert_eq!(
+            body.get("model").and_then(|v| v.as_str()),
+            Some("deepseek-v4-pro")
+        );
+    }
+
+    #[test]
+    fn test_codex_vision_routing_streaming_and_non_streaming_same_path() {
+        // 流式与非流式请求走同一替换路径：stream 字段不参与判定，两种都替换
+        let mut provider = create_provider(json!({}));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_vision_model: Some("qwen3.8-max".to_string()),
+            ..Default::default()
+        });
+
+        for stream in [false, true] {
+            let mut body = json!({
+                "model": "deepseek-v4-pro",
+                "stream": stream,
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            { "type": "input_text", "text": "描述这张图" },
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,DDDD"
+                            }
+                        ]
+                    }
+                ]
+            });
+
+            let replaced = apply_codex_vision_routing(&provider, &mut body);
+
+            assert_eq!(
+                replaced.as_deref(),
+                Some("qwen3.8-max"),
+                "stream={stream} 应同样替换"
+            );
+            assert_eq!(
+                body.get("model").and_then(|v| v.as_str()),
+                Some("qwen3.8-max"),
+                "stream={stream} 应同样替换"
+            );
+            assert_eq!(body.get("stream").and_then(|v| v.as_bool()), Some(stream));
+        }
+    }
+
+    #[test]
+    fn test_codex_vision_routing_noop_when_already_vision_model() {
+        // 当前模型已是视觉模型时不重复替换（避免无意义改写与日志噪音）
+        let mut provider = create_provider(json!({}));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_vision_model: Some("qwen3.8-max".to_string()),
+            ..Default::default()
+        });
+        let mut body = json!({
+            "model": "qwen3.8-max",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        { "type": "input_text", "text": "看图" },
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,EEEE"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        assert_eq!(apply_codex_vision_routing(&provider, &mut body), None);
+        assert_eq!(
+            body.get("model").and_then(|v| v.as_str()),
+            Some("qwen3.8-max")
+        );
     }
 
     #[test]
