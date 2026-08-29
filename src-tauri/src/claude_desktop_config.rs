@@ -777,7 +777,10 @@ pub fn map_proxy_request_model(mut body: Value, provider: &Provider) -> Result<V
 
     body["model"] = json!(upstream_model);
     apply_vision_routing(&mut body, provider, &upstream_model);
-    if should_normalize_mimo_anthropic_thinking_history(provider, &upstream_model) {
+    // 视觉路由可能已替换模型；MiMo 规范化决策必须基于最终路由模型，
+    // 否则视觉模型请求会被错误套用 MiMo 历史重写（Codex review P2）。
+    let routed_model = body["model"].as_str().unwrap_or(&upstream_model);
+    if should_normalize_mimo_anthropic_thinking_history(provider, routed_model) {
         normalize_mimo_anthropic_thinking_history(&mut body);
     }
     Ok(body)
@@ -2080,6 +2083,43 @@ mod tests {
         });
         let mapped = map_proxy_request_model(tool_use_body, &vision_provider).expect("map route");
         assert_eq!(mapped["model"], json!("kimi-k2"));
+
+        // MiMo 上游 + 视觉路由到非 MiMo 模型：MiMo 历史重写必须基于最终路由模型，
+        // 不应把视觉模型请求错误套用 redacted_thinking 替换（Codex review P2）。
+        let mut mimo_upstream_provider = proxy_provider("proxy");
+        let mimo_meta = mimo_upstream_provider.meta.as_mut().expect("meta");
+        mimo_meta.api_format = Some("anthropic".to_string());
+        mimo_meta.claude_desktop_model_routes = std::collections::HashMap::from([(
+            "claude-sonnet-4-6".to_string(),
+            ClaudeDesktopModelRoute {
+                model: "mimo-large".to_string(),
+                label_override: None,
+                supports_1m: None,
+                prefer_1m: None,
+            },
+        )]);
+        mimo_meta.claude_desktop_vision_model = Some("qwen3.8-max".to_string());
+        let mimo_body = json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}}
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "f", "input": {}},
+                    {"type": "redacted_thinking", "data": "..."}
+                ]}
+            ]
+        });
+        let mapped =
+            map_proxy_request_model(mimo_body, &mimo_upstream_provider).expect("map route");
+        assert_eq!(mapped["model"], json!("qwen3.8-max"));
+        let blocks = mapped["messages"][1]["content"]
+            .as_array()
+            .expect("content array");
+        assert!(blocks
+            .iter()
+            .any(|block| block["type"] == json!("redacted_thinking")));
     }
 
     #[test]
