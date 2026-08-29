@@ -131,6 +131,9 @@ interface CodexFormFieldsProps {
   onCodexChatReasoningChange?: (value: CodexChatReasoning) => void;
   promptCacheRouting: PromptCacheRoutingMode;
   onPromptCacheRoutingChange: (value: PromptCacheRoutingMode) => void;
+  // 视觉自动路由目标模型（上游模型名；留空 = 不启用）。仅 Codex 表单传入。
+  codexVisionModel?: string;
+  onCodexVisionModelChange?: (value: string) => void;
 
   // Model Catalog
   catalogModels?: CodexCatalogModel[];
@@ -415,6 +418,8 @@ export function CodexFormFields({
   onCodexChatReasoningChange,
   promptCacheRouting,
   onPromptCacheRoutingChange,
+  codexVisionModel = "",
+  onCodexVisionModelChange,
   catalogModels = [],
   onCatalogModelsChange,
   speedTestEndpoints,
@@ -475,7 +480,8 @@ export function CodexFormFields({
     supportsThinking ||
     supportsEffort ||
     promptCacheRouting !== "auto" ||
-    !!maxOutputTokens;
+    !!maxOutputTokens ||
+    !!codexVisionModel.trim();
   const [advancedExpanded, setAdvancedExpanded] = useState(
     isXaiOauthPreset ? false : hasAnyAdvancedValue,
   );
@@ -1058,6 +1064,31 @@ export function CodexFormFields({
                     </p>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* 视觉自动路由：Codex 专属，三种上游格式（Responses/Chat/Anthropic）都生效 */}
+            {!isGrokBuild && onCodexVisionModelChange && (
+              <div className="space-y-1.5 border-t border-border-default pt-3">
+                <FormLabel htmlFor="codex-vision-model">
+                  {t("codexConfig.visionModelLabel", {
+                    defaultValue: "视觉模型（可选）",
+                  })}
+                </FormLabel>
+                <Input
+                  id="codex-vision-model"
+                  value={codexVisionModel}
+                  onChange={(event) =>
+                    onCodexVisionModelChange(event.target.value)
+                  }
+                  placeholder="qwen3.8-max"
+                />
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  {t("codexConfig.visionModelHint", {
+                    defaultValue:
+                      "消息包含图片时自动改用该模型（如 qwen3.8-max、glm-4.6v），纯文本请求不受影响——无需手动切换模型即可发图。留空 = 不启用。",
+                  })}
+                </p>
               </div>
             )}
 

@@ -1531,6 +1531,11 @@ impl RequestForwarder {
                 );
             }
             super::providers::apply_codex_chat_upstream_model(provider, &mut mapped_body);
+            // 视觉自动路由：meta.codexVisionModel 非空且请求含图片时换用视觉模型，
+            // 必须在模型映射之后执行，否则会被默认上游模型覆盖。
+            if matches!(app_type, AppType::Codex) {
+                super::providers::apply_codex_vision_routing(provider, &mut mapped_body);
+            }
             let reasoning_config =
                 super::providers::resolve_codex_chat_reasoning_config(provider, &mapped_body);
             let mut chat_body = super::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(
@@ -1548,6 +1553,10 @@ impl RequestForwarder {
         } else if codex_responses_to_anthropic {
             let mut mapped_body = mapped_body;
             super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+            // 视觉自动路由：与 Chat 分支同理，模型映射完成后才替换。
+            if matches!(app_type, AppType::Codex) {
+                super::providers::apply_codex_vision_routing(provider, &mut mapped_body);
+            }
             // Per-provider output ceiling override. Codex does not forward its
             // `model_max_output_tokens` in the request body, so honor the value
             // configured on the provider here — it takes precedence over any
@@ -1618,6 +1627,12 @@ impl RequestForwarder {
                 adapter.transform_request(mapped_body, provider)?
             }
         } else {
+            // Native Responses 直通：模型名即目录/上游模型名，视觉路由直接在此处
+            // 替换（其余分支在各自的模型映射之后替换）。
+            let mut mapped_body = mapped_body;
+            if matches!(app_type, AppType::Codex) {
+                super::providers::apply_codex_vision_routing(provider, &mut mapped_body);
+            }
             mapped_body
         };
 

@@ -421,6 +421,7 @@ function ProviderFormFull({
     setCodexFastMode(initialData?.meta?.codexFastMode ?? false);
     setCodexChatReasoning(initialData?.meta?.codexChatReasoning ?? {});
     setPromptCacheRouting(initialData?.meta?.promptCacheRouting ?? "auto");
+    setCodexVisionModel(initialData?.meta?.codexVisionModel ?? "");
     setCustomUserAgent(initialData?.meta?.customUserAgent ?? "");
     setLocalProxyHeadersOverride(
       formatRequestOverrideObject(
@@ -618,6 +619,9 @@ function ProviderFormFull({
     useState<PromptCacheRoutingMode>(
       () => initialData?.meta?.promptCacheRouting ?? "auto",
     );
+  const [codexVisionModel, setCodexVisionModel] = useState<string>(
+    () => initialData?.meta?.codexVisionModel ?? "",
+  );
   const [customUserAgent, setCustomUserAgent] = useState<string>(
     () => initialData?.meta?.customUserAgent ?? "",
   );
@@ -1769,6 +1773,11 @@ function ProviderFormFull({
         promptCacheRouting !== "auto"
           ? promptCacheRouting
           : undefined,
+      // Codex 视觉自动路由：对三种上游格式（Responses/Chat/Anthropic）都生效
+      codexVisionModel:
+        appId === "codex" && category !== "official"
+          ? codexVisionModel.trim() || undefined
+          : undefined,
       customUserAgent:
         (appId === "claude" || appId === "codex") && category !== "official"
           ? customUserAgent.trim() || undefined
@@ -1994,6 +2003,8 @@ function ProviderFormFull({
       resetCodexConfig(auth, config, preset.modelCatalog ?? []);
       setCodexChatReasoning(preset.codexChatReasoning ?? {});
       setPromptCacheRouting(preset.promptCacheRouting ?? "auto");
+      // 预设不携带视觉路由配置，切换预设时清空避免残留旧值
+      setCodexVisionModel("");
       setLocalCodexApiFormat(
         preset.apiFormat ??
           codexApiFormatFromWireApi(extractCodexWireApi(config)) ??
@@ -2500,6 +2511,8 @@ function ProviderFormFull({
               onCodexChatReasoningChange={setCodexChatReasoning}
               promptCacheRouting={promptCacheRouting}
               onPromptCacheRoutingChange={setPromptCacheRouting}
+              codexVisionModel={codexVisionModel}
+              onCodexVisionModelChange={setCodexVisionModel}
               catalogModels={codexCatalogModels}
               onCatalogModelsChange={setCodexCatalogModels}
               speedTestEndpoints={speedTestEndpoints}
